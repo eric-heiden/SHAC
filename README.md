@@ -63,6 +63,8 @@ If the console outputs `Finish Successfully` in the last line, the code installa
 Running the following commands in `examples` folder allows to train Ant with SHAC.
 ```
 python train_shac.py --cfg ./cfg/shac/ant.yaml --logdir ./logs/Ant/shac
+python train_shac.py --cfg ./cfg/shac/cartpole_swing_up.yaml --logdir ./logs/Cartpole/shac
+python train_shac.py --cfg ./cfg/shac/cartpole_swing_up_warp.yaml --logdir ./logs/Cartpole/shac
 ```
 
 We also provide a one-line script in the `examples/train_script.sh` folder to replicate the results reported in the paper for both our method and for baseline method. The results might slightly differ from the paper due to the randomness of the cuda and different Operating System/GPU/Python versions. The plot reported in paper is produced with TITAN X on Ubuntu 16.04.

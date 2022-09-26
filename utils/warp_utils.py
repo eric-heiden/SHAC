@@ -118,10 +118,7 @@ class IntegratorSimulate(torch.autograd.Function):
         act,
         joint_q_start,
         joint_qd_start,
-        joint_q_end,
-        joint_qd_end,
         model,
-        state_in,
         integrator,
         sim_dt,
     ):
@@ -130,51 +127,81 @@ class IntegratorSimulate(torch.autograd.Function):
         ctx.act = wp.from_torch(act)
         ctx.joint_q_start = wp.from_torch(joint_q_start)
         ctx.joint_qd_start = wp.from_torch(joint_qd_start)
-        ctx.joint_q_end = wp.from_torch(joint_q_end)
-        ctx.joint_qd_end = wp.from_torch(joint_qd_end)
+
         ctx.act.requires_grad = True
+        ctx.joint_q_start.requires_grad = True
+        ctx.joint_qd_start.requires_grad = True
+
+        ctx.model.joint_q.requires_grad = True
+        ctx.model.joint_qd.requires_grad = True
+        ctx.model.joint_act.requires_grad = True
+        ctx.model.body_q.requires_grad = True
+        ctx.model.body_qd.requires_grad = True
+
         # allocate output
+        ctx.state_temp = model.state(requires_grad=True)
         ctx.state_out = model.state(requires_grad=True)
 
-        with ctx.tape:
+        ctx.out_q = wp.zeros(len(model.joint_q), dtype=wp.float32, requires_grad=True)
+        ctx.out_qd = wp.zeros(len(model.joint_qd), dtype=wp.float32, requires_grad=True)
+
+        with ctx.tape:        
             float_assign_joint_act(ctx.model.joint_act, ctx.act)
             float_assign_2d(ctx.model.joint_q, ctx.joint_q_start)
             float_assign_2d(ctx.model.joint_qd, ctx.joint_qd_start)
-            # updates body position/vel
-            ctx.state_out = integrator.simulate(model, state_in, ctx.state_out, sim_dt)
-            # updates joint_q joint_qd
-            float_assign(ctx.joint_q_end, ctx.model.joint_q)
-            float_assign(ctx.joint_qd_end, ctx.model.joint_qd)
-            wp.sim.eval_ik(ctx.model, ctx.state_out, ctx.joint_q_end, ctx.joint_qd_end)
+            # applies input q, qd
+            wp.sim.eval_fk(ctx.model, ctx.model.joint_q, ctx.model.joint_qd, None, ctx.state_temp)
+            # updates body position/vel, applies input control forces
+            ctx.state_out = integrator.simulate(ctx.model, ctx.state_temp, ctx.state_out, sim_dt)
+            # updates q, qd
+            wp.sim.eval_ik(ctx.model, ctx.state_out, ctx.out_q, ctx.out_qd)
+
+        import numpy as np
+        ctx.tape.backward(grads={
+            ctx.out_q: wp.array(np.ones((len(ctx.out_q)), dtype=np.float32)),
+            ctx.out_qd: wp.array(np.ones((len(ctx.out_qd)), dtype=np.float32)),
+        })
+        ctx.joint_act_grad = wp.to_torch(ctx.tape.gradients[ctx.act]).clone()
+        ctx.joint_q_grad = wp.to_torch(ctx.tape.gradients[ctx.model.joint_q]).clone().view(-1, 2)
+        ctx.joint_qd_grad = wp.to_torch(ctx.tape.gradients[ctx.joint_qd_start]).clone().view(-1, 2)
+
+        print("joint_act_grad", ctx.joint_act_grad)
+        print("joint_q_grad", ctx.joint_q_grad)
+        print("joint_qd_grad", ctx.joint_qd_grad)
+        ctx.tape.zero()
 
         return (
-            wp.to_torch(ctx.joint_q_end).view(-1, 2),
-            wp.to_torch(ctx.joint_qd_end).view(-1, 2),
+            wp.to_torch(ctx.out_q).view(-1, 2),
+            wp.to_torch(ctx.out_qd).view(-1, 2),
         )
 
     @staticmethod
     def backward(ctx, adj_joint_q, adj_joint_qd):
 
         # map incoming Torch grads to our output variables
-        ctx.joint_q_end.grad = wp.from_torch(adj_joint_q.flatten())
-        ctx.joint_qd_end.grad = wp.from_torch(adj_joint_qd.flatten())
+        # ctx.out_q.grad = wp.from_torch(adj_joint_q.flatten())
+        # ctx.out_qd.grad = wp.from_torch(adj_joint_qd.flatten())
 
-        ctx.tape.backward()
-        joint_act_grad = wp.to_torch(ctx.tape.gradients[ctx.act])
-        joint_q_grad = wp.to_torch(ctx.tape.gradients[ctx.joint_q_start])
-        joint_qd_grad = wp.to_torch(ctx.tape.gradients[ctx.joint_qd_start])
-        # print(f"joint_q_grad.norm(): {joint_q_grad.norm()}")
-        # print(f"joint_qd_grad.norm(): {joint_qd_grad.norm()}")
-        # print(f"joint_act_grad.norm(): {joint_act_grad.norm()}")
+        # ctx.tape.backward(grads={
+        #     ctx.out_q: wp.from_torch(adj_joint_q.flatten()),
+        #     ctx.out_qd: wp.from_torch(adj_joint_qd.flatten()),
+        # })
+        # import numpy as np
+        # ctx.tape.backward(grads={
+        #     ctx.out_q: wp.array(np.ones((len(ctx.out_q)), dtype=np.float32)),
+        #     ctx.out_qd: wp.array(np.ones((len(ctx.out_qd)), dtype=np.float32)),
+        # })
+        # joint_act_grad = wp.to_torch(ctx.tape.gradients[ctx.act]).clone()
+        # joint_q_grad = wp.to_torch(ctx.tape.gradients[ctx.joint_q_start]).clone()
+        # joint_qd_grad = wp.to_torch(ctx.tape.gradients[ctx.joint_qd_start]).clone()
+
+        # ctx.tape.zero()
 
         # return adjoint w.r.t. inputs
         return (
-            joint_act_grad,
-            joint_q_grad,
-            joint_qd_grad,
-            None,
-            None,
-            None,
+            ctx.joint_act_grad,
+            ctx.joint_q_grad,
+            ctx.joint_qd_grad,
             None,
             None,
             None,
